@@ -5,6 +5,7 @@
 
 package io.opentelemetry.javaagent.instrumentation.jms.v1_1;
 
+import static io.opentelemetry.api.common.AttributeKey.stringKey;
 import static io.opentelemetry.api.trace.SpanKind.CLIENT;
 import static io.opentelemetry.api.trace.SpanKind.CONSUMER;
 import static io.opentelemetry.api.trace.SpanKind.PRODUCER;
@@ -24,6 +25,7 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
+import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.instrumentation.testing.internal.AutoCleanupExtension;
 import io.opentelemetry.instrumentation.testing.junit.AgentInstrumentationExtension;
 import io.opentelemetry.instrumentation.testing.junit.InstrumentationExtension;
@@ -41,9 +43,11 @@ import javax.jms.Destination;
 import javax.jms.JMSException;
 import javax.jms.Message;
 import javax.jms.MessageConsumer;
+import javax.jms.MessageListener;
 import javax.jms.MessageProducer;
 import javax.jms.Session;
 import javax.jms.TextMessage;
+import javax.jms.Topic;
 import org.assertj.core.api.AbstractAssert;
 import org.hornetq.api.core.TransportConfiguration;
 import org.hornetq.api.core.client.ClientSession;
@@ -61,6 +65,7 @@ import org.hornetq.core.server.HornetQServer;
 import org.hornetq.core.server.HornetQServers;
 import org.hornetq.jms.client.HornetQConnectionFactory;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -68,6 +73,10 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 @SuppressWarnings("deprecation") // using deprecated semconv
 class Jms2InstrumentationTest {
+
+  // messaging.destination.subscription.name only exists in the v1.43 messaging semantic conventions
+  private static final AttributeKey<String> MESSAGING_DESTINATION_SUBSCRIPTION_NAME =
+      stringKey("messaging.destination.subscription.name");
 
   @RegisterExtension
   static final InstrumentationExtension testing = AgentInstrumentationExtension.create();
@@ -113,12 +122,67 @@ class Jms2InstrumentationTest {
         HornetQJMSClient.createConnectionFactoryWithoutHA(
             JMSFactoryType.CF, new TransportConfiguration(InVMConnectorFactory.class.getName()));
     Connection connection = connectionFactory.createConnection();
+    connection.setClientID("jms-2-test");
     connection.start();
     session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
     session.run();
     cleanup.deferAfterAll(connectionFactory::close);
     cleanup.deferAfterAll(connection);
     cleanup.deferAfterAll(session);
+  }
+
+  @SuppressWarnings("deprecation") // using deprecated semconv
+  @Test
+  void capturesDurableConsumerName() throws JMSException {
+    Topic topic = session.createTopic("someTopic");
+    TextMessage sentMessage = session.createTextMessage("a message");
+    MessageProducer producer = session.createProducer(topic);
+    cleanup.deferCleanup(producer);
+    MessageConsumer consumer = session.createDurableConsumer(topic, "durable-subscription");
+    cleanup.deferCleanup(consumer);
+    MessageListener listener = message -> {};
+    consumer.setMessageListener(listener);
+    assertThat(consumer.getMessageListener()).isSameAs(listener);
+    consumer.setMessageListener(null);
+
+    testing.runWithSpan("producer parent", () -> producer.send(sentMessage));
+    TextMessage receivedMessage =
+        testing.runWithSpan("consumer parent", () -> (TextMessage) consumer.receive());
+
+    String messageId = receivedMessage.getJMSMessageID();
+    AtomicReference<SpanData> producerSpan = new AtomicReference<>();
+    testing.waitAndAssertTraces(
+        trace -> {
+          trace.hasSpansSatisfyingExactly(
+              span -> span.hasName("producer parent").hasNoParent(),
+              span ->
+                  span.hasKind(PRODUCER)
+                      .hasParent(trace.getSpan(0))
+                      .hasAttributesSatisfyingExactly(
+                          equalTo(MESSAGING_SYSTEM, "jms"),
+                          messagingDestinationName("someTopic", false),
+                          oldOperation("publish"),
+                          operationName("send"),
+                          operationType("send"),
+                          equalTo(MESSAGING_MESSAGE_ID, messageId),
+                          messagingTempDestination(false)));
+          producerSpan.set(trace.getSpan(1));
+        },
+        trace ->
+            trace.hasSpansSatisfyingExactly(
+                span -> span.hasName("consumer parent").hasNoParent(),
+                span ->
+                    span.hasKind(emitStableMessagingSemconv() ? CLIENT : CONSUMER)
+                        .hasParent(trace.getSpan(0))
+                        .hasLinks(LinkData.create(producerSpan.get().getSpanContext()))
+                        .hasAttributesSatisfyingExactly(
+                            equalTo(MESSAGING_SYSTEM, "jms"),
+                            messagingDestinationName("someTopic", false),
+                            oldOperation("receive"),
+                            operationName("receive"),
+                            operationType("receive"),
+                            equalTo(MESSAGING_MESSAGE_ID, messageId),
+                            subscriptionName("durable-subscription"))));
   }
 
   @MethodSource("destinationArguments")
@@ -309,6 +373,12 @@ class Jms2InstrumentationTest {
 
   private static AttributeAssertion operationType(String operation) {
     return equalTo(MESSAGING_OPERATION_TYPE, emitStableMessagingSemconv() ? operation : null);
+  }
+
+  private static AttributeAssertion subscriptionName(String subscriptionName) {
+    return equalTo(
+        MESSAGING_DESTINATION_SUBSCRIPTION_NAME,
+        emitStableMessagingSemconv() ? subscriptionName : null);
   }
 
   private static Stream<Arguments> emptyReceiveArguments() {

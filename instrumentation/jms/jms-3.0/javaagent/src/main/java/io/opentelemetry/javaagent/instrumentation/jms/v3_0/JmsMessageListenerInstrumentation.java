@@ -60,8 +60,10 @@ class JmsMessageListenerInstrumentation implements TypeInstrumentation {
       @Nullable
       public static AdviceScope start(Message message) {
         Context parentContext = Context.current();
+        String subscriptionName = JmsConsumerContext.getSubscriptionName(message);
         MessageWithDestination messageWithDestination =
-            MessageWithDestination.create(JakartaMessageAdapter.create(message), null);
+            MessageWithDestination.create(
+                JakartaMessageAdapter.create(message), null, subscriptionName);
 
         if (!consumerProcessInstrumenter().shouldStart(parentContext, messageWithDestination)) {
           return null;

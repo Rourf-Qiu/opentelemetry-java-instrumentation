@@ -7,6 +7,7 @@ package io.opentelemetry.javaagent.instrumentation.spring.jms.v6_0;
 
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import io.opentelemetry.instrumentation.testing.internal.AutoCleanupExtension;
 import io.opentelemetry.instrumentation.testing.junit.AgentInstrumentationExtension;
@@ -24,7 +25,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.SpringApplication;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.jms.config.JmsListenerEndpointRegistry;
 import org.springframework.jms.core.JmsTemplate;
+import org.springframework.jms.listener.DefaultMessageListenerContainer;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -63,8 +66,17 @@ abstract class AbstractSpringJmsListenerTest {
     app.setDefaultProperties(defaultConfig());
     ConfigurableApplicationContext applicationContext = app.run();
     cleanup.deferCleanup(applicationContext);
+    JmsListenerEndpointRegistry registry =
+        applicationContext.getBean(JmsListenerEndpointRegistry.class);
+    await()
+        .until(
+            () ->
+                registry.getListenerContainers().stream()
+                    .map(DefaultMessageListenerContainer.class::cast)
+                    .allMatch(container -> container.getActiveConsumerCount() > 0));
 
     JmsTemplate jmsTemplate = new JmsTemplate(applicationContext.getBean(ConnectionFactory.class));
+    jmsTemplate.setPubSubDomain(true);
     String message = "hello there";
 
     // when

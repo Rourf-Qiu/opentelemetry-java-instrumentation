@@ -12,6 +12,7 @@ import static io.opentelemetry.javaagent.instrumentation.jms.v3_0.JmsSingletons.
 import static net.bytebuddy.matcher.ElementMatchers.isPublic;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.returns;
+import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
 import static net.bytebuddy.matcher.ElementMatchers.takesArguments;
 
 import io.opentelemetry.instrumentation.api.internal.Timer;
@@ -19,6 +20,8 @@ import io.opentelemetry.javaagent.extension.instrumentation.TypeInstrumentation;
 import io.opentelemetry.javaagent.extension.instrumentation.TypeTransformer;
 import io.opentelemetry.javaagent.instrumentation.jms.common.v1_1.MessageWithDestination;
 import jakarta.jms.Message;
+import jakarta.jms.MessageConsumer;
+import jakarta.jms.MessageListener;
 import javax.annotation.Nullable;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.description.type.TypeDescription;
@@ -50,28 +53,66 @@ class JmsMessageConsumerInstrumentation implements TypeInstrumentation {
             .and(returns(named("jakarta.jms.Message")))
             .and(isPublic()),
         getClass().getName() + "$ConsumerAdvice");
+    transformer.applyAdviceToMethod(
+        named("setMessageListener")
+            .and(takesArguments(1))
+            .and(takesArgument(0, named("jakarta.jms.MessageListener")))
+            .and(isPublic()),
+        getClass().getName() + "$SetMessageListenerAdvice");
+    transformer.applyAdviceToMethod(
+        named("getMessageListener")
+            .and(takesArguments(0))
+            .and(returns(named("jakarta.jms.MessageListener")))
+            .and(isPublic()),
+        getClass().getName() + "$GetMessageListenerAdvice");
   }
 
   @SuppressWarnings("unused")
   public static class ConsumerAdvice {
 
-    @Advice.OnMethodEnter(suppress = Throwable.class, inline = false)
+    @Advice.OnMethodEnter(suppress = Throwable.class)
     public static Timer onEnter() {
       return Timer.start();
     }
 
-    @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
+    @Advice.OnMethodExit(suppress = Throwable.class)
     public static void stopSpan(
-        @Advice.Enter Timer timer, @Advice.Return @Nullable Message message) {
+        @Advice.This MessageConsumer consumer,
+        @Advice.Enter Timer timer,
+        @Advice.Return @Nullable Message message) {
       if (message == null) {
         // Do not create span when no message is received
         return;
       }
 
+      String subscriptionName = JmsConsumerContext.getSubscriptionName(consumer);
+      JmsConsumerContext.setSubscriptionName(message, subscriptionName);
       MessageWithDestination request =
-          MessageWithDestination.create(JakartaMessageAdapter.create(message), null);
+          MessageWithDestination.create(
+              JakartaMessageAdapter.create(message), null, subscriptionName);
 
       createReceiveSpan(consumerReceiveInstrumenter(), request, timer, null);
+    }
+  }
+
+  @SuppressWarnings("unused")
+  public static class SetMessageListenerAdvice {
+
+    @Advice.OnMethodEnter(suppress = Throwable.class, inline = false)
+    public static void onEnter(
+        @Advice.This MessageConsumer consumer,
+        @Advice.Argument(value = 0, readOnly = false) @Nullable MessageListener messageListener) {
+      messageListener = JmsConsumerContext.wrapMessageListener(consumer, messageListener);
+    }
+  }
+
+  @SuppressWarnings("unused")
+  public static class GetMessageListenerAdvice {
+
+    @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
+    public static void onExit(
+        @Advice.Return(readOnly = false) @Nullable MessageListener messageListener) {
+      messageListener = JmsConsumerContext.unwrapMessageListener(messageListener);
     }
   }
 }

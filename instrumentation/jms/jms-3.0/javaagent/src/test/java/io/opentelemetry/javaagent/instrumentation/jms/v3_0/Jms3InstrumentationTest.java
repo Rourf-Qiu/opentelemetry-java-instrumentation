@@ -12,6 +12,7 @@ import static io.opentelemetry.instrumentation.api.internal.SemconvStability.emi
 import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.equalTo;
 import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_MESSAGE_ID;
 import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_SYSTEM;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.opentelemetry.sdk.trace.data.LinkData;
@@ -19,14 +20,64 @@ import io.opentelemetry.sdk.trace.data.SpanData;
 import jakarta.jms.Destination;
 import jakarta.jms.JMSException;
 import jakarta.jms.MessageConsumer;
+import jakarta.jms.MessageListener;
 import jakarta.jms.MessageProducer;
 import jakarta.jms.TextMessage;
+import jakarta.jms.Topic;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.activemq.artemis.jms.client.ActiveMQDestination;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 class Jms3InstrumentationTest extends AbstractJms3Test {
+
+  @SuppressWarnings("deprecation") // using deprecated semconv
+  @Test
+  void capturesDurableConsumerName() throws Exception {
+    Topic topic = session.createTopic("durable-topic");
+    TextMessage sentMessage = session.createTextMessage("hello there");
+    MessageProducer producer = session.createProducer(topic);
+    cleanup.deferCleanup(producer);
+    MessageConsumer consumer = session.createDurableConsumer(topic, "durable-subscription");
+    cleanup.deferCleanup(consumer);
+
+    testing.runWithSpan("producer parent", () -> producer.send(sentMessage));
+    CompletableFuture<TextMessage> receivedMessage = new CompletableFuture<>();
+    MessageListener listener = message -> receivedMessage.complete((TextMessage) message);
+    consumer.setMessageListener(listener);
+    assertThat(consumer.getMessageListener()).isSameAs(listener);
+
+    String messageId = receivedMessage.get(10, SECONDS).getJMSMessageID();
+    testing.waitAndAssertTraces(
+        trace ->
+            trace.hasSpansSatisfyingExactly(
+                span -> span.hasName("producer parent").hasNoParent(),
+                span ->
+                    span.hasKind(PRODUCER)
+                        .hasParent(trace.getSpan(0))
+                        .hasAttributesSatisfyingExactly(
+                            equalTo(MESSAGING_SYSTEM, "jms"),
+                            messagingDestinationName("durable-topic", "durable-topic"),
+                            oldOperation("publish"),
+                            operationName("send"),
+                            operationType("send"),
+                            equalTo(MESSAGING_MESSAGE_ID, messageId),
+                            messagingTempDestination(false)),
+                span ->
+                    span.hasKind(CONSUMER)
+                        .hasParent(trace.getSpan(1))
+                        .hasAttributesSatisfyingExactly(
+                            equalTo(MESSAGING_SYSTEM, "jms"),
+                            messagingDestinationName("durable-topic", "durable-topic"),
+                            oldOperation("process"),
+                            operationName("process"),
+                            operationType("process"),
+                            equalTo(MESSAGING_MESSAGE_ID, messageId),
+                            messagingTempDestination(false),
+                            subscriptionName("durable-subscription"))));
+  }
 
   @SuppressWarnings("deprecation") // using deprecated semconv
   @ParameterizedTest
