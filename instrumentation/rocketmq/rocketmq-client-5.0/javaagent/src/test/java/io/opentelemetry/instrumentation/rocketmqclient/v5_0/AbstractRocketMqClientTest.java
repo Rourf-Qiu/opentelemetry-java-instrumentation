@@ -38,6 +38,7 @@ import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
 import static java.util.Collections.singletonMap;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.instrumentation.testing.internal.AutoCleanupExtension;
@@ -53,6 +54,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.apache.rocketmq.client.apis.ClientConfiguration;
@@ -90,6 +92,7 @@ abstract class AbstractRocketMqClientTest {
 
   private final ClientServiceProvider provider = ClientServiceProvider.loadService();
   private final AtomicBoolean failurePending = new AtomicBoolean();
+  private final AtomicReference<CountDownLatch> failureRetryGate = new AtomicReference<>();
   private PushConsumer consumer;
   private Producer producer;
 
@@ -120,6 +123,15 @@ abstract class AbstractRocketMqClientTest {
                   testing().runWithSpan("messageListener", () -> {});
                   if (failurePending.compareAndSet(true, false)) {
                     return ConsumeResult.FAILURE;
+                  }
+                  CountDownLatch retryGate = failureRetryGate.get();
+                  if (retryGate != null) {
+                    try {
+                      retryGate.await();
+                    } catch (InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                      return ConsumeResult.FAILURE;
+                    }
                   }
                   return ConsumeResult.SUCCESS;
                 })
@@ -269,76 +281,87 @@ abstract class AbstractRocketMqClientTest {
             .setBody(body)
             .build();
 
+    CountDownLatch retryGate = new CountDownLatch(1);
+    failureRetryGate.set(retryGate);
     failurePending.set(true);
-    SendReceipt sendReceipt =
-        testing()
-            .runWithSpan(
-                "parent",
-                (ThrowingSupplier<SendReceipt, ClientException>) () -> producer.send(message));
+    SendReceipt sendReceipt;
     AtomicReference<SpanData> sendSpanData = new AtomicReference<>();
-    testing()
-        .waitAndAssertSortedTraces(
-            orderByRootSpanKind(
-                SpanKind.INTERNAL, emitStableMessagingSemconv() ? CLIENT : CONSUMER),
-            trace -> {
-              if (emitStableMessagingSemconv()) {
+    try {
+      sendReceipt =
+          testing()
+              .runWithSpan(
+                  "parent",
+                  (ThrowingSupplier<SendReceipt, ClientException>) () -> producer.send(message));
+      testing()
+          .waitAndAssertSortedTraces(
+              orderByRootSpanKind(
+                  SpanKind.INTERNAL, emitStableMessagingSemconv() ? CLIENT : CONSUMER),
+              trace -> {
+                if (emitStableMessagingSemconv()) {
+                  trace.hasSpansSatisfyingExactly(
+                      span -> span.hasName("parent").hasKind(SpanKind.INTERNAL).hasNoParent(),
+                      span ->
+                          assertProducerSpan(span, NORMAL_TOPIC, TAG, keys, body, sendReceipt)
+                              .hasParent(trace.getSpan(0)),
+                      span ->
+                          assertFailedProcessSpan(
+                                  span,
+                                  trace.getSpan(1),
+                                  NORMAL_TOPIC,
+                                  CONSUMER_GROUP,
+                                  TAG,
+                                  keys,
+                                  body,
+                                  sendReceipt)
+                              .hasParent(trace.getSpan(1)),
+                      span ->
+                          span.hasName("messageListener")
+                              .hasKind(SpanKind.INTERNAL)
+                              .hasParent(trace.getSpan(2)));
+                } else {
+                  trace.hasSpansSatisfyingExactly(
+                      span -> span.hasName("parent").hasKind(SpanKind.INTERNAL).hasNoParent(),
+                      span ->
+                          assertProducerSpan(span, NORMAL_TOPIC, TAG, keys, body, sendReceipt)
+                              .hasParent(trace.getSpan(0)));
+                }
+                sendSpanData.set(trace.getSpan(1));
+              },
+              trace -> {
+                if (emitStableMessagingSemconv()) {
+                  trace.hasSpansSatisfyingExactly(
+                      span ->
+                          assertReceiveSpan(
+                              span, NORMAL_TOPIC, CONSUMER_GROUP, sendSpanData.get()));
+                  return;
+                }
                 trace.hasSpansSatisfyingExactly(
-                    span -> span.hasName("parent").hasKind(SpanKind.INTERNAL).hasNoParent(),
-                    span ->
-                        assertProducerSpan(span, NORMAL_TOPIC, TAG, keys, body, sendReceipt)
-                            .hasParent(trace.getSpan(0)),
+                    span -> assertReceiveSpan(span, NORMAL_TOPIC, CONSUMER_GROUP),
                     span ->
                         assertFailedProcessSpan(
                                 span,
-                                trace.getSpan(1),
+                                sendSpanData.get(),
                                 NORMAL_TOPIC,
                                 CONSUMER_GROUP,
                                 TAG,
                                 keys,
                                 body,
                                 sendReceipt)
-                            .hasParent(trace.getSpan(1)),
+                            .hasParent(trace.getSpan(0)),
                     span ->
                         span.hasName("messageListener")
                             .hasKind(SpanKind.INTERNAL)
-                            .hasParent(trace.getSpan(2)));
-              } else {
-                trace.hasSpansSatisfyingExactly(
-                    span -> span.hasName("parent").hasKind(SpanKind.INTERNAL).hasNoParent(),
-                    span ->
-                        assertProducerSpan(span, NORMAL_TOPIC, TAG, keys, body, sendReceipt)
-                            .hasParent(trace.getSpan(0)));
-              }
-              sendSpanData.set(trace.getSpan(1));
-            },
-            trace -> {
-              if (emitStableMessagingSemconv()) {
-                trace.hasSpansSatisfyingExactly(
-                    span ->
-                        assertReceiveSpan(span, NORMAL_TOPIC, CONSUMER_GROUP, sendSpanData.get()));
-                return;
-              }
-              trace.hasSpansSatisfyingExactly(
-                  span -> assertReceiveSpan(span, NORMAL_TOPIC, CONSUMER_GROUP),
-                  span ->
-                      assertFailedProcessSpan(
-                              span,
-                              sendSpanData.get(),
-                              NORMAL_TOPIC,
-                              CONSUMER_GROUP,
-                              TAG,
-                              keys,
-                              body,
-                              sendReceipt)
-                          .hasParent(trace.getSpan(0)),
-                  span ->
-                      span.hasName("messageListener")
-                          .hasKind(SpanKind.INTERNAL)
-                          .hasParent(trace.getSpan(1)));
-            });
-    if (emitStableMessagingSemconv()) {
-      assertFailureMetrics();
+                            .hasParent(trace.getSpan(1)));
+              });
+      if (emitStableMessagingSemconv()) {
+        assertFailureMetrics();
+      }
+      testing().clearData();
+    } finally {
+      retryGate.countDown();
+      failureRetryGate.compareAndSet(retryGate, null);
     }
+    waitForSuccessfulRedelivery(sendReceipt);
   }
 
   @Test
@@ -1059,6 +1082,22 @@ abstract class AbstractRocketMqClientTest {
                                                     equalTo(
                                                         MESSAGING_DESTINATION_NAME,
                                                         NORMAL_TOPIC))))));
+  }
+
+  private void waitForSuccessfulRedelivery(SendReceipt sendReceipt) {
+    await()
+        .atMost(Duration.ofSeconds(45))
+        .untilAsserted(
+            () ->
+                assertThat(testing().spans())
+                    .filteredOn(
+                        span ->
+                            sendReceipt
+                                    .getMessageId()
+                                    .toString()
+                                    .equals(span.getAttributes().get(MESSAGING_MESSAGE_ID))
+                                && span.getStatus().equals(StatusData.unset()))
+                    .hasSize(1));
   }
 
   private void assertMetricsForReceiveOwnedMessage() {
