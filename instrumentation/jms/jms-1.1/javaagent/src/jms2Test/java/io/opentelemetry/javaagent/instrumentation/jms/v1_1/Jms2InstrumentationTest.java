@@ -283,8 +283,7 @@ class Jms2InstrumentationTest {
     firstConnection.start();
     Session firstSession = firstConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
     Topic firstTopic = firstSession.createTopic("someTopic");
-    MessageConsumer firstConsumer =
-        firstSession.createSharedDurableConsumer(firstTopic, "closed-subscription");
+    MessageConsumer firstConsumer = firstSession.createConsumer(firstTopic);
     firstConsumer.setMessageListener(listener);
     firstConnection.close();
 

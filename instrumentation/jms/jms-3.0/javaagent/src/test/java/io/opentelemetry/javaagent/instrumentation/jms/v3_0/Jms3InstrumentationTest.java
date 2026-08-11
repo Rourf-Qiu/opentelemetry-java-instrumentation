@@ -181,8 +181,7 @@ class Jms3InstrumentationTest extends AbstractJms3Test {
     firstConnection.start();
     Session firstSession = firstConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
     Topic firstTopic = firstSession.createTopic("implicit-close-topic");
-    MessageConsumer firstConsumer =
-        firstSession.createSharedDurableConsumer(firstTopic, "closed-subscription");
+    MessageConsumer firstConsumer = firstSession.createConsumer(firstTopic);
     firstConsumer.setMessageListener(listener);
     firstConnection.close();
 

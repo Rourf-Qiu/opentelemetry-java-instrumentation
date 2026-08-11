@@ -7,9 +7,11 @@ package io.opentelemetry.javaagent.instrumentation.jms.v3_0;
 
 import static io.opentelemetry.javaagent.extension.matcher.AgentElementMatchers.hasClassesNamed;
 import static io.opentelemetry.javaagent.extension.matcher.AgentElementMatchers.implementsInterface;
+import static net.bytebuddy.matcher.ElementMatchers.hasSuperType;
 import static net.bytebuddy.matcher.ElementMatchers.isPublic;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.namedOneOf;
+import static net.bytebuddy.matcher.ElementMatchers.returns;
 import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
 
 import io.opentelemetry.javaagent.extension.instrumentation.TypeInstrumentation;
@@ -36,6 +38,9 @@ class JmsSessionInstrumentation implements TypeInstrumentation {
   @Override
   public void transform(TypeTransformer transformer) {
     transformer.applyAdviceToMethod(
+        returns(hasSuperType(named("jakarta.jms.MessageConsumer"))).and(isPublic()),
+        getClass().getName() + "$CreateConsumerAdvice");
+    transformer.applyAdviceToMethod(
         namedOneOf(
                 "createDurableSubscriber",
                 "createDurableConsumer",
@@ -53,11 +58,21 @@ class JmsSessionInstrumentation implements TypeInstrumentation {
 
     @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
     public static void onExit(
-        @Advice.This Session session,
         @Advice.Argument(1) String subscriptionName,
         @Advice.Return @Nullable MessageConsumer consumer) {
       if (consumer != null) {
         JmsConsumerContext.setSubscriptionName(consumer, subscriptionName);
+      }
+    }
+  }
+
+  @SuppressWarnings("unused")
+  public static class CreateConsumerAdvice {
+
+    @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
+    public static void onExit(
+        @Advice.This Session session, @Advice.Return @Nullable MessageConsumer consumer) {
+      if (consumer != null) {
         JmsConsumerContext.registerConsumer(session, consumer);
       }
     }
