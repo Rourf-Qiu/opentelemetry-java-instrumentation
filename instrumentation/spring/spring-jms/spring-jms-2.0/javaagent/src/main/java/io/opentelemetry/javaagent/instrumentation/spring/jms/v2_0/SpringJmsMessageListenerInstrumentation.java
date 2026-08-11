@@ -69,15 +69,13 @@ class SpringJmsMessageListenerInstrumentation implements TypeInstrumentation {
         Context receiveContext = JmsReceiveContextHolder.getReceiveContext(parentContext);
         if (receiveContext != null) {
           parentContext = receiveContext;
-        } else {
-          parentContext = Context.root();
         }
 
         MessageWithDestination request =
             MessageWithDestination.create(JavaxMessageAdapter.create(message), null);
 
         Context context;
-        try (Scope ignored = parentContext.makeCurrent()) {
+        try (Scope ignored = Context.root().makeCurrent()) {
           if (!listenerInstrumenter().shouldStart(parentContext, request)) {
             return null;
           }
