@@ -6,10 +6,11 @@
 package io.opentelemetry.javaagent.instrumentation.jms.v1_1;
 
 import io.opentelemetry.instrumentation.api.util.VirtualField;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
-import java.util.Map;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Objects;
-import java.util.WeakHashMap;
 import javax.annotation.Nullable;
 import javax.jms.Connection;
 import javax.jms.Message;
@@ -229,21 +230,45 @@ public final class JmsConsumerContext {
   }
 
   private static class ListenerSubscriptions {
-    private final Map<MessageConsumer, String> subscriptions = new WeakHashMap<>();
+    private final List<ListenerSubscription> subscriptions = new ArrayList<>();
 
     synchronized void add(MessageConsumer consumer, @Nullable String subscriptionName) {
-      subscriptions.put(consumer, subscriptionName);
+      Iterator<ListenerSubscription> iterator = subscriptions.iterator();
+      while (iterator.hasNext()) {
+        ListenerSubscription subscription = iterator.next();
+        MessageConsumer registeredConsumer = subscription.consumer.get();
+        if (registeredConsumer == null) {
+          iterator.remove();
+        } else if (registeredConsumer == consumer) {
+          subscription.subscriptionName = subscriptionName;
+          return;
+        }
+      }
+      subscriptions.add(new ListenerSubscription(consumer, subscriptionName));
     }
 
     synchronized void remove(MessageConsumer consumer) {
-      subscriptions.remove(consumer);
+      Iterator<ListenerSubscription> iterator = subscriptions.iterator();
+      while (iterator.hasNext()) {
+        MessageConsumer registeredConsumer = iterator.next().consumer.get();
+        if (registeredConsumer == null || registeredConsumer == consumer) {
+          iterator.remove();
+        }
+      }
     }
 
     @Nullable
     synchronized String getSubscriptionName() {
       boolean found = false;
       String subscriptionName = null;
-      for (String candidate : subscriptions.values()) {
+      Iterator<ListenerSubscription> iterator = subscriptions.iterator();
+      while (iterator.hasNext()) {
+        ListenerSubscription subscription = iterator.next();
+        if (subscription.consumer.get() == null) {
+          iterator.remove();
+          continue;
+        }
+        String candidate = subscription.subscriptionName;
         if (found && !Objects.equals(subscriptionName, candidate)) {
           return null;
         }
@@ -254,45 +279,82 @@ public final class JmsConsumerContext {
     }
   }
 
+  private static class ListenerSubscription {
+    private final WeakReference<MessageConsumer> consumer;
+    @Nullable private String subscriptionName;
+
+    private ListenerSubscription(MessageConsumer consumer, @Nullable String subscriptionName) {
+      this.consumer = new WeakReference<>(consumer);
+      this.subscriptionName = subscriptionName;
+    }
+  }
+
   private static class ConsumerRegistry {
-    private final Map<MessageConsumer, Boolean> consumers = new WeakHashMap<>();
+    private final WeakIdentitySet<MessageConsumer> consumers = new WeakIdentitySet<>();
     private boolean closed;
 
     synchronized void add(MessageConsumer consumer) {
       if (closed) {
         closeConsumer(consumer);
       } else {
-        consumers.put(consumer, true);
+        consumers.add(consumer);
       }
     }
 
     synchronized void close() {
       closed = true;
-      for (MessageConsumer consumer : new ArrayList<>(consumers.keySet())) {
+      for (MessageConsumer consumer : consumers.drain()) {
         closeConsumer(consumer);
       }
-      consumers.clear();
     }
   }
 
   private static class SessionRegistry {
-    private final Map<Session, Boolean> sessions = new WeakHashMap<>();
+    private final WeakIdentitySet<Session> sessions = new WeakIdentitySet<>();
     private boolean closed;
 
     synchronized void add(Session session) {
       if (closed) {
         closeSession(session);
       } else {
-        sessions.put(session, true);
+        sessions.add(session);
       }
     }
 
     synchronized void close() {
       closed = true;
-      for (Session session : new ArrayList<>(sessions.keySet())) {
+      for (Session session : sessions.drain()) {
         closeSession(session);
       }
-      sessions.clear();
+    }
+  }
+
+  private static class WeakIdentitySet<T> {
+    private final List<WeakReference<T>> values = new ArrayList<>();
+
+    void add(T value) {
+      Iterator<WeakReference<T>> iterator = values.iterator();
+      while (iterator.hasNext()) {
+        T registeredValue = iterator.next().get();
+        if (registeredValue == null) {
+          iterator.remove();
+        } else if (registeredValue == value) {
+          return;
+        }
+      }
+      values.add(new WeakReference<>(value));
+    }
+
+    List<T> drain() {
+      List<T> liveValues = new ArrayList<>();
+      for (WeakReference<T> reference : values) {
+        T value = reference.get();
+        if (value != null) {
+          liveValues.add(value);
+        }
+      }
+      values.clear();
+      return liveValues;
     }
   }
 }
