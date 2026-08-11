@@ -11,6 +11,7 @@ import static io.opentelemetry.instrumentation.api.internal.SemconvStability.emi
 import static io.opentelemetry.instrumentation.api.internal.SemconvStability.emitStableMessagingSemconv;
 import static io.opentelemetry.instrumentation.testing.junit.message.MessageHeaderUtil.headerAttributeKey;
 import static io.opentelemetry.instrumentation.testing.util.TelemetryDataUtil.orderByRootSpanKind;
+import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.assertThat;
 import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.equalTo;
 import static io.opentelemetry.semconv.ErrorAttributes.ERROR_TYPE;
 import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_BATCH_MESSAGE_COUNT;
@@ -250,6 +251,9 @@ abstract class AbstractRocketMqClientTest {
                           .hasKind(SpanKind.INTERNAL)
                           .hasParent(trace.getSpan(1)));
             });
+    if (emitStableMessagingSemconv()) {
+      assertMetricsForReceiveOwnedMessage();
+    }
   }
 
   @Test
@@ -332,6 +336,9 @@ abstract class AbstractRocketMqClientTest {
                           .hasKind(SpanKind.INTERNAL)
                           .hasParent(trace.getSpan(1)));
             });
+    if (emitStableMessagingSemconv()) {
+      assertFailureMetrics();
+    }
   }
 
   @Test
@@ -999,6 +1006,173 @@ abstract class AbstractRocketMqClientTest {
             .hasStatus(StatusData.unset())
             .hasAttributesSatisfyingExactly(attributeAssertions);
     return result.hasLinks(LinkData.create(linkedSpan.getSpanContext()));
+  }
+
+  private void assertFailureMetrics() {
+    testing()
+        .waitAndAssertMetrics(
+            "io.opentelemetry.rocketmq-client-5.0",
+            "messaging.process.duration",
+            metrics ->
+                metrics.satisfiesExactly(
+                    metric ->
+                        assertThat(metric)
+                            .hasHistogramSatisfying(
+                                histogram ->
+                                    histogram.hasPointsSatisfying(
+                                        point ->
+                                            point
+                                                .hasCount(1)
+                                                .hasAttributesSatisfyingExactly(
+                                                    equalTo(MESSAGING_OPERATION_NAME, "process"),
+                                                    equalTo(MESSAGING_SYSTEM, "rocketmq"),
+                                                    equalTo(
+                                                        ERROR_TYPE, ConsumeResult.FAILURE.name()),
+                                                    equalTo(
+                                                        MESSAGING_CONSUMER_GROUP_NAME,
+                                                        CONSUMER_GROUP),
+                                                    equalTo(
+                                                        MESSAGING_DESTINATION_NAME,
+                                                        NORMAL_TOPIC))))));
+    testing()
+        .waitAndAssertMetrics(
+            "io.opentelemetry.rocketmq-client-5.0",
+            "messaging.client.consumed.messages",
+            metrics ->
+                metrics.satisfiesExactly(
+                    metric ->
+                        assertThat(metric)
+                            .satisfies(
+                                data -> assertThat(data.getLongSumData().getPoints()).hasSize(1))
+                            .hasLongSumSatisfying(
+                                sum ->
+                                    sum.hasPointsSatisfying(
+                                        point ->
+                                            point
+                                                .hasValue(1)
+                                                .hasAttributesSatisfyingExactly(
+                                                    equalTo(MESSAGING_OPERATION_NAME, "receive"),
+                                                    equalTo(MESSAGING_SYSTEM, "rocketmq"),
+                                                    equalTo(
+                                                        MESSAGING_CONSUMER_GROUP_NAME,
+                                                        CONSUMER_GROUP),
+                                                    equalTo(
+                                                        MESSAGING_DESTINATION_NAME,
+                                                        NORMAL_TOPIC))))));
+  }
+
+  private void assertMetricsForReceiveOwnedMessage() {
+    testing()
+        .waitAndAssertMetrics(
+            "io.opentelemetry.rocketmq-client-5.0",
+            "messaging.client.sent.messages",
+            metrics ->
+                metrics.satisfiesExactly(
+                    metric ->
+                        assertThat(metric)
+                            .hasLongSumSatisfying(
+                                sum ->
+                                    sum.hasPointsSatisfying(
+                                        point ->
+                                            point
+                                                .hasValue(1)
+                                                .hasAttributesSatisfyingExactly(
+                                                    equalTo(MESSAGING_OPERATION_NAME, "send"),
+                                                    equalTo(MESSAGING_SYSTEM, "rocketmq"),
+                                                    equalTo(
+                                                        MESSAGING_DESTINATION_NAME,
+                                                        NORMAL_TOPIC))))));
+    testing()
+        .waitAndAssertMetrics(
+            "io.opentelemetry.rocketmq-client-5.0",
+            "messaging.client.operation.duration",
+            metrics ->
+                metrics.satisfiesExactly(
+                    metric ->
+                        assertThat(metric)
+                            .hasHistogramSatisfying(
+                                histogram ->
+                                    histogram.hasPointsSatisfying(
+                                        point ->
+                                            point
+                                                .hasCount(1)
+                                                .hasAttributesSatisfyingExactly(
+                                                    equalTo(MESSAGING_OPERATION_NAME, "send"),
+                                                    equalTo(MESSAGING_SYSTEM, "rocketmq"),
+                                                    equalTo(
+                                                        MESSAGING_DESTINATION_NAME, NORMAL_TOPIC),
+                                                    equalTo(MESSAGING_OPERATION_TYPE, "send")),
+                                        point ->
+                                            point
+                                                .hasCount(1)
+                                                .hasAttributesSatisfyingExactly(
+                                                    equalTo(MESSAGING_OPERATION_NAME, "receive"),
+                                                    equalTo(MESSAGING_SYSTEM, "rocketmq"),
+                                                    equalTo(
+                                                        MESSAGING_CONSUMER_GROUP_NAME,
+                                                        CONSUMER_GROUP),
+                                                    equalTo(
+                                                        MESSAGING_DESTINATION_NAME, NORMAL_TOPIC),
+                                                    equalTo(
+                                                        MESSAGING_OPERATION_TYPE, "receive"))))));
+    testing()
+        .waitAndAssertMetrics(
+            "io.opentelemetry.rocketmq-client-5.0",
+            "messaging.process.duration",
+            metrics ->
+                metrics.satisfiesExactly(
+                    metric ->
+                        assertThat(metric)
+                            .hasHistogramSatisfying(
+                                histogram ->
+                                    histogram.hasPointsSatisfying(
+                                        point ->
+                                            point
+                                                .hasCount(1)
+                                                .hasAttributesSatisfyingExactly(
+                                                    equalTo(MESSAGING_OPERATION_NAME, "process"),
+                                                    equalTo(MESSAGING_SYSTEM, "rocketmq"),
+                                                    equalTo(
+                                                        MESSAGING_CONSUMER_GROUP_NAME,
+                                                        CONSUMER_GROUP),
+                                                    equalTo(
+                                                        MESSAGING_DESTINATION_NAME,
+                                                        NORMAL_TOPIC))))));
+    testing()
+        .waitAndAssertMetrics(
+            "io.opentelemetry.rocketmq-client-5.0",
+            "messaging.client.consumed.messages",
+            metrics ->
+                metrics.satisfiesExactly(
+                    metric ->
+                        assertThat(metric)
+                            .satisfies(
+                                data -> assertThat(data.getLongSumData().getPoints()).hasSize(1))
+                            .hasLongSumSatisfying(
+                                sum ->
+                                    sum.hasPointsSatisfying(
+                                        point ->
+                                            point
+                                                .hasValue(1)
+                                                .hasAttributesSatisfyingExactly(
+                                                    equalTo(MESSAGING_OPERATION_NAME, "receive"),
+                                                    equalTo(MESSAGING_SYSTEM, "rocketmq"),
+                                                    equalTo(
+                                                        MESSAGING_CONSUMER_GROUP_NAME,
+                                                        CONSUMER_GROUP),
+                                                    equalTo(
+                                                        MESSAGING_DESTINATION_NAME,
+                                                        NORMAL_TOPIC))))));
+    assertThat(testing().metrics())
+        .noneMatch(
+            metric ->
+                metric
+                        .getInstrumentationScopeInfo()
+                        .getName()
+                        .equals("io.opentelemetry.rocketmq-client-5.0")
+                    && (metric.getName().equals("messaging.publish.duration")
+                        || metric.getName().equals("messaging.receive.duration")
+                        || metric.getName().equals("messaging.receive.messages")));
   }
 
   private static AttributeAssertion bodySize(byte[] body) {
