@@ -40,6 +40,8 @@ final class PulsarBatchRequestSpanLinksExtractor implements SpanLinksExtractor<P
   public void extract(
       SpanLinksBuilder spanLinks, Context parentContext, PulsarBatchRequest request) {
 
+    boolean hasVaryingDestinations =
+        emitStableMessagingSemconv() && hasVaryingDestinations(request);
     for (Message<?> message : request.getMessages()) {
       PulsarRequest messageRequest =
           PulsarRequest.create(message, request.getUrlData(), request.getSubscription());
@@ -51,18 +53,37 @@ final class PulsarBatchRequestSpanLinksExtractor implements SpanLinksExtractor<P
       Context extracted =
           propagator.extract(Context.root(), messageRequest, MessageTextMapGetter.INSTANCE);
       spanLinks.addLink(
-          Span.fromContext(extracted).getSpanContext(), getLinkAttributes(request, messageRequest));
+          Span.fromContext(extracted).getSpanContext(),
+          getLinkAttributes(request, messageRequest, hasVaryingDestinations));
     }
   }
 
+  private static boolean hasVaryingDestinations(PulsarBatchRequest request) {
+    String destination = null;
+    boolean first = true;
+    for (Message<?> message : request.getMessages()) {
+      if (first) {
+        destination = message.getTopicName();
+        first = false;
+      } else if (!Objects.equals(destination, message.getTopicName())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private static Attributes getLinkAttributes(
-      PulsarBatchRequest batchRequest, PulsarRequest messageRequest) {
+      PulsarBatchRequest batchRequest,
+      PulsarRequest messageRequest,
+      boolean hasVaryingDestinations) {
     AttributesBuilder attributes = Attributes.builder();
     attributes.put(
         MESSAGING_MESSAGE_ID, messagingAttributesGetter.getMessageId(messageRequest, null));
 
     String destination = messagingAttributesGetter.getDestination(messageRequest);
-    if (!Objects.equals(destination, batchMessagingAttributesGetter.getDestination(batchRequest))) {
+    if (hasVaryingDestinations
+        || !Objects.equals(
+            destination, batchMessagingAttributesGetter.getDestination(batchRequest))) {
       attributes.put(MESSAGING_DESTINATION_NAME, destination);
     }
 

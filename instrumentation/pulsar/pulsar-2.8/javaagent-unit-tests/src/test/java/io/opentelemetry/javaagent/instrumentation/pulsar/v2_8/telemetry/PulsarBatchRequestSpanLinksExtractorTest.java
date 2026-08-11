@@ -89,6 +89,33 @@ class PulsarBatchRequestSpanLinksExtractorTest {
                     .build()));
   }
 
+  @Test
+  void addsEveryDestinationWhenBatchSpansMultipleTopics() {
+    String topic1 = "persistent://public/default/topic-1";
+    String topic2 = "persistent://public/default/topic-2";
+    Message<?> message1 = message(topic1, "message-1", SPAN_ID_1);
+    Message<?> message2 = message(topic2, "message-2", SPAN_ID_2);
+    PulsarBatchRequest request = request(message1, message2);
+    RecordingSpanLinksBuilder spanLinks = new RecordingSpanLinksBuilder();
+
+    extractor.extract(spanLinks, Context.root(), request);
+
+    assertThat(spanLinks.links)
+        .containsExactly(
+            linkData(
+                SPAN_ID_1,
+                Attributes.builder()
+                    .put(MESSAGING_MESSAGE_ID, "message-1")
+                    .put(MESSAGING_DESTINATION_NAME, topic1)
+                    .build()),
+            linkData(
+                SPAN_ID_2,
+                Attributes.builder()
+                    .put(MESSAGING_MESSAGE_ID, "message-2")
+                    .put(MESSAGING_DESTINATION_NAME, topic2)
+                    .build()));
+  }
+
   private static Message<?> message(String topic, String messageId, String spanId) {
     Message<?> message = mock(Message.class);
     MessageId id = mock(MessageId.class);
