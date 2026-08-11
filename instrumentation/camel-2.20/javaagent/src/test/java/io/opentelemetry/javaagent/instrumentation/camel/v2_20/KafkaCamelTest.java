@@ -9,11 +9,14 @@ import static io.opentelemetry.javaagent.instrumentation.camel.v2_20.CamelMessag
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.opentelemetry.context.Context;
 import io.opentelemetry.instrumentation.testing.internal.AutoCleanupExtension;
 import io.opentelemetry.instrumentation.testing.junit.AgentInstrumentationExtension;
 import io.opentelemetry.instrumentation.testing.junit.InstrumentationExtension;
 import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import org.apache.camel.CamelContext;
 import org.apache.camel.ProducerTemplate;
 import org.apache.camel.builder.RouteBuilder;
@@ -72,9 +75,10 @@ class KafkaCamelTest {
   @Test
   void camelOwnsMetricsOverKafkaClients() throws Exception {
     ProducerTemplate template = camelContext.createProducerTemplate();
-    Thread sender = new Thread(() -> template.sendBody("direct:input", "test message"));
-    sender.start();
-    sender.join();
+    ExecutorService sender = Executors.newSingleThreadExecutor();
+    cleanup.deferCleanup(sender::shutdownNow);
+    sender.submit(() -> template.sendBody("direct:input", "test message")).get();
+    assertThat(sender.submit(Context::current).get()).isEqualTo(Context.root());
     assertThat(received.await(1, MINUTES)).isTrue();
 
     assertSendAndProcessMetrics(

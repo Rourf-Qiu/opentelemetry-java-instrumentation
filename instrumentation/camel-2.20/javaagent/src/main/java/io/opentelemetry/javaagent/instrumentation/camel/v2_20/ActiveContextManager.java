@@ -105,13 +105,10 @@ public class ActiveContextManager {
   public static void endSend(Exchange exchange, Object state, boolean closeScopes) {
     synchronized (exchange) {
       SendScope sendScope = (SendScope) state;
-      sendScope.complete = true;
-      if (closeScopes) {
-        sendScope.closeScopes();
-      }
+      sendScope.finish(closeScopes);
 
       SendScope current = exchange.getProperty(SEND_SCOPE_PROPERTY, SendScope.class);
-      while (current != null && current.complete) {
+      while (current != null && current.isComplete()) {
         current = current.parent;
       }
       exchange.setProperty(SEND_SCOPE_PROPERTY, current);
@@ -127,18 +124,25 @@ public class ActiveContextManager {
       this.parent = parent;
     }
 
-    private void capture(ContextWithScope contextWithScope) {
+    private synchronized void capture(ContextWithScope contextWithScope) {
       scopes.add(contextWithScope);
     }
 
-    private void addActivated(ContextWithScope contextWithScope) {
+    private synchronized void addActivated(ContextWithScope contextWithScope) {
       scopes.add(0, contextWithScope);
     }
 
-    private void closeScopes() {
-      for (ContextWithScope contextWithScope : scopes) {
-        contextWithScope.closeScope();
+    private synchronized void finish(boolean closeScopes) {
+      complete = true;
+      if (closeScopes) {
+        for (ContextWithScope contextWithScope : scopes) {
+          contextWithScope.closeScope();
+        }
       }
+    }
+
+    private synchronized boolean isComplete() {
+      return complete;
     }
   }
 

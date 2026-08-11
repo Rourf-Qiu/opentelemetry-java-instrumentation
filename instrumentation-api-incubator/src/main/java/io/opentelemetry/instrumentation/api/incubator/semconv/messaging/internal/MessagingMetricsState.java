@@ -14,7 +14,7 @@ import io.opentelemetry.context.ContextKey;
  * <p>This class is internal and is hence not for public use. Its APIs are unstable and can change
  * at any time.
  */
-public final class MessagingMetricsState {
+public class MessagingMetricsState {
 
   private static final ContextKey<Boolean> CONSUMED_MESSAGES =
       ContextKey.named("messaging-consumed-messages-metrics");
