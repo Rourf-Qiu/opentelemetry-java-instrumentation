@@ -3,62 +3,52 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package io.opentelemetry.javaagent.instrumentation.jms.v3_0;
+package io.opentelemetry.javaagent.instrumentation.jms.v1_1;
 
 import static io.opentelemetry.javaagent.extension.matcher.AgentElementMatchers.hasClassesNamed;
 import static io.opentelemetry.javaagent.extension.matcher.AgentElementMatchers.implementsInterface;
 import static net.bytebuddy.matcher.ElementMatchers.isPublic;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.namedOneOf;
-import static net.bytebuddy.matcher.ElementMatchers.takesArgument;
 
 import io.opentelemetry.javaagent.extension.instrumentation.TypeInstrumentation;
 import io.opentelemetry.javaagent.extension.instrumentation.TypeTransformer;
-import jakarta.jms.MessageConsumer;
-import jakarta.jms.Session;
 import javax.annotation.Nullable;
+import javax.jms.Connection;
+import javax.jms.Session;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.matcher.ElementMatcher;
 
-class JmsSessionInstrumentation implements TypeInstrumentation {
+class JmsConnectionInstrumentation implements TypeInstrumentation {
 
   @Override
   public ElementMatcher<ClassLoader> classLoaderOptimization() {
-    return hasClassesNamed("jakarta.jms.Session");
+    return hasClassesNamed("javax.jms.Connection");
   }
 
   @Override
   public ElementMatcher<TypeDescription> typeMatcher() {
-    return implementsInterface(named("jakarta.jms.Session"));
+    return implementsInterface(named("javax.jms.Connection"));
   }
 
   @Override
   public void transform(TypeTransformer transformer) {
     transformer.applyAdviceToMethod(
-        namedOneOf(
-                "createDurableSubscriber",
-                "createDurableConsumer",
-                "createSharedConsumer",
-                "createSharedDurableConsumer")
-            .and(takesArgument(1, String.class))
-            .and(isPublic()),
-        getClass().getName() + "$CreateDurableConsumerAdvice");
+        namedOneOf("createSession", "createQueueSession", "createTopicSession").and(isPublic()),
+        getClass().getName() + "$CreateSessionAdvice");
     transformer.applyAdviceToMethod(
         named("close").and(isPublic()), getClass().getName() + "$CloseAdvice");
   }
 
   @SuppressWarnings("unused")
-  public static class CreateDurableConsumerAdvice {
+  public static class CreateSessionAdvice {
 
     @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
     public static void onExit(
-        @Advice.This Session session,
-        @Advice.Argument(1) String subscriptionName,
-        @Advice.Return @Nullable MessageConsumer consumer) {
-      if (consumer != null) {
-        JmsConsumerContext.setSubscriptionName(consumer, subscriptionName);
-        JmsConsumerContext.registerConsumer(session, consumer);
+        @Advice.This Connection connection, @Advice.Return @Nullable Session session) {
+      if (session != null) {
+        JmsConsumerContext.registerSession(connection, session);
       }
     }
   }
@@ -67,8 +57,8 @@ class JmsSessionInstrumentation implements TypeInstrumentation {
   public static class CloseAdvice {
 
     @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
-    public static void onExit(@Advice.This Session session) {
-      JmsConsumerContext.closeSession(session);
+    public static void onExit(@Advice.This Connection connection) {
+      JmsConsumerContext.closeConnection(connection);
     }
   }
 }

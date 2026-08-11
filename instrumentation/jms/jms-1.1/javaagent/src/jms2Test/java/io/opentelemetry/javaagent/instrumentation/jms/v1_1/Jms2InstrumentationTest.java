@@ -23,6 +23,7 @@ import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.
 import static java.util.Collections.singletonList;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.params.provider.Arguments.argumentSet;
 import static org.junit.jupiter.params.provider.Arguments.arguments;
 
 import io.opentelemetry.api.common.AttributeKey;
@@ -83,6 +84,8 @@ class Jms2InstrumentationTest {
 
   @RegisterExtension static final AutoCleanupExtension cleanup = AutoCleanupExtension.create();
 
+  private static HornetQConnectionFactory connectionFactory;
+  private static Connection connection;
   private static Session session;
 
   @BeforeAll
@@ -118,10 +121,10 @@ class Jms2InstrumentationTest {
     sf.close();
     serverLocator.close();
 
-    HornetQConnectionFactory connectionFactory =
+    connectionFactory =
         HornetQJMSClient.createConnectionFactoryWithoutHA(
             JMSFactoryType.CF, new TransportConfiguration(InVMConnectorFactory.class.getName()));
-    Connection connection = connectionFactory.createConnection();
+    connection = connectionFactory.createConnection();
     connection.setClientID("jms-2-test");
     connection.start();
     session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE);
@@ -183,6 +186,136 @@ class Jms2InstrumentationTest {
                             operationType("receive"),
                             equalTo(MESSAGING_MESSAGE_ID, messageId),
                             subscriptionName("durable-subscription"))));
+  }
+
+  @ParameterizedTest
+  @MethodSource("sharedConsumerArguments")
+  void capturesSharedConsumerNameOnReceive(
+      String subscriptionName, SharedConsumerFactory consumerFactory) throws JMSException {
+    Topic topic = session.createTopic("someTopic");
+    TextMessage sentMessage = session.createTextMessage("a message");
+    MessageProducer producer = session.createProducer(topic);
+    cleanup.deferCleanup(producer);
+    MessageConsumer consumer = consumerFactory.create(session, topic, subscriptionName);
+    cleanup.deferCleanup(consumer);
+
+    testing.runWithSpan("producer parent", () -> producer.send(sentMessage));
+    TextMessage receivedMessage =
+        testing.runWithSpan("consumer parent", () -> (TextMessage) consumer.receive());
+
+    String messageId = receivedMessage.getJMSMessageID();
+    AtomicReference<SpanData> producerSpan = new AtomicReference<>();
+    testing.waitAndAssertTraces(
+        trace -> {
+          trace.hasSpansSatisfyingExactly(
+              span -> span.hasName("producer parent").hasNoParent(),
+              span ->
+                  span.hasKind(PRODUCER)
+                      .hasParent(trace.getSpan(0))
+                      .hasAttributesSatisfyingExactly(
+                          equalTo(MESSAGING_SYSTEM, "jms"),
+                          messagingDestinationName("someTopic", false),
+                          oldOperation("publish"),
+                          operationName("send"),
+                          operationType("send"),
+                          equalTo(MESSAGING_MESSAGE_ID, messageId),
+                          messagingTempDestination(false)));
+          producerSpan.set(trace.getSpan(1));
+        },
+        trace ->
+            trace.hasSpansSatisfyingExactly(
+                span -> span.hasName("consumer parent").hasNoParent(),
+                span ->
+                    span.hasKind(emitStableMessagingSemconv() ? CLIENT : CONSUMER)
+                        .hasParent(trace.getSpan(0))
+                        .hasLinks(LinkData.create(producerSpan.get().getSpanContext()))
+                        .hasAttributesSatisfyingExactly(
+                            equalTo(MESSAGING_SYSTEM, "jms"),
+                            messagingDestinationName("someTopic", false),
+                            oldOperation("receive"),
+                            operationName("receive"),
+                            operationType("receive"),
+                            equalTo(MESSAGING_MESSAGE_ID, messageId),
+                            subscriptionName(subscriptionName))));
+  }
+
+  @ParameterizedTest
+  @MethodSource("sharedConsumerArguments")
+  void capturesSharedConsumerNameOnProviderStyleListenerDispatch(
+      String subscriptionName, SharedConsumerFactory consumerFactory) throws JMSException {
+    Topic topic = session.createTopic("someTopic");
+    TextMessage message = session.createTextMessage("a message");
+    message.setJMSDestination(topic);
+    MessageConsumer consumer = consumerFactory.create(session, topic, subscriptionName);
+    cleanup.deferCleanup(consumer);
+    MessageListener listener = ignored -> {};
+    consumer.setMessageListener(listener);
+
+    MessageListener providerListener = consumer.getMessageListener();
+    assertThat(providerListener).isSameAs(listener);
+    providerListener.onMessage(message);
+
+    testing.waitAndAssertTraces(
+        trace ->
+            trace.hasSpansSatisfyingExactly(
+                span ->
+                    span.hasName(
+                            emitStableMessagingSemconv()
+                                ? "process someTopic"
+                                : "someTopic process")
+                        .hasKind(CONSUMER)
+                        .hasNoParent()
+                        .hasAttributesSatisfyingExactly(
+                            equalTo(MESSAGING_SYSTEM, "jms"),
+                            messagingDestinationName("someTopic", false),
+                            oldOperation("process"),
+                            operationName("process"),
+                            operationType("process"),
+                            messagingTempDestination(false),
+                            subscriptionName(subscriptionName))));
+  }
+
+  @Test
+  void capturesSharedConsumerNameAfterImplicitConnectionClose() throws JMSException {
+    MessageListener listener = ignored -> {};
+    Connection firstConnection = connectionFactory.createConnection();
+    firstConnection.setClientID("implicit-close-first");
+    firstConnection.start();
+    Session firstSession = firstConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+    Topic firstTopic = firstSession.createTopic("someTopic");
+    MessageConsumer firstConsumer =
+        firstSession.createSharedDurableConsumer(firstTopic, "closed-subscription");
+    firstConsumer.setMessageListener(listener);
+    firstConnection.close();
+
+    Connection secondConnection = connectionFactory.createConnection();
+    cleanup.deferCleanup(secondConnection);
+    secondConnection.setClientID("implicit-close-second");
+    secondConnection.start();
+    Session secondSession = secondConnection.createSession(false, Session.AUTO_ACKNOWLEDGE);
+    Topic secondTopic = secondSession.createTopic("someTopic");
+    TextMessage message = secondSession.createTextMessage("a message");
+    message.setJMSDestination(secondTopic);
+    MessageConsumer secondConsumer =
+        secondSession.createSharedConsumer(secondTopic, "active-subscription");
+    secondConsumer.setMessageListener(listener);
+
+    secondConsumer.getMessageListener().onMessage(message);
+
+    testing.waitAndAssertTraces(
+        trace ->
+            trace.hasSpansSatisfyingExactly(
+                span ->
+                    span.hasKind(CONSUMER)
+                        .hasNoParent()
+                        .hasAttributesSatisfyingExactly(
+                            equalTo(MESSAGING_SYSTEM, "jms"),
+                            messagingDestinationName("someTopic", false),
+                            oldOperation("process"),
+                            operationName("process"),
+                            operationType("process"),
+                            messagingTempDestination(false),
+                            subscriptionName("active-subscription"))));
   }
 
   @MethodSource("destinationArguments")
@@ -407,6 +540,16 @@ class Jms2InstrumentationTest {
         arguments(tempQueue, "(temporary)", true));
   }
 
+  private static Stream<Arguments> sharedConsumerArguments() {
+    return Stream.of(
+        argumentSet(
+            "shared", "shared-subscription", (SharedConsumerFactory) Session::createSharedConsumer),
+        argumentSet(
+            "shared durable",
+            "shared-durable-subscription",
+            (SharedConsumerFactory) Session::createSharedDurableConsumer));
+  }
+
   @FunctionalInterface
   interface DestinationFactory {
 
@@ -417,5 +560,12 @@ class Jms2InstrumentationTest {
   interface MessageReceiver {
 
     Message receive(MessageConsumer consumer) throws JMSException;
+  }
+
+  @FunctionalInterface
+  interface SharedConsumerFactory {
+
+    MessageConsumer create(Session session, Topic topic, String subscriptionName)
+        throws JMSException;
   }
 }

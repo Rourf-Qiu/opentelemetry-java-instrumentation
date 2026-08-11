@@ -60,11 +60,8 @@ class JmsMessageConsumerInstrumentation implements TypeInstrumentation {
             .and(isPublic()),
         getClass().getName() + "$SetMessageListenerAdvice");
     transformer.applyAdviceToMethod(
-        named("getMessageListener")
-            .and(takesArguments(0))
-            .and(returns(named("jakarta.jms.MessageListener")))
-            .and(isPublic()),
-        getClass().getName() + "$GetMessageListenerAdvice");
+        named("close").and(takesArguments(0)).and(isPublic()),
+        getClass().getName() + "$CloseAdvice");
   }
 
   @SuppressWarnings("unused")
@@ -98,21 +95,31 @@ class JmsMessageConsumerInstrumentation implements TypeInstrumentation {
   @SuppressWarnings("unused")
   public static class SetMessageListenerAdvice {
 
+    @Nullable
     @Advice.OnMethodEnter(suppress = Throwable.class, inline = false)
-    public static void onEnter(
+    public static JmsConsumerContext.ListenerUpdate onEnter(
         @Advice.This MessageConsumer consumer,
-        @Advice.Argument(value = 0, readOnly = false) @Nullable MessageListener messageListener) {
-      messageListener = JmsConsumerContext.wrapMessageListener(consumer, messageListener);
+        @Advice.Argument(0) @Nullable MessageListener messageListener) {
+      return JmsConsumerContext.updateMessageListener(consumer, messageListener);
+    }
+
+    @Advice.OnMethodExit(onThrowable = Throwable.class, suppress = Throwable.class, inline = false)
+    public static void onExit(
+        @Advice.This MessageConsumer consumer,
+        @Advice.Enter @Nullable JmsConsumerContext.ListenerUpdate update,
+        @Advice.Thrown @Nullable Throwable throwable) {
+      if (throwable != null) {
+        JmsConsumerContext.rollbackMessageListener(consumer, update);
+      }
     }
   }
 
   @SuppressWarnings("unused")
-  public static class GetMessageListenerAdvice {
+  public static class CloseAdvice {
 
     @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
-    public static void onExit(
-        @Advice.Return(readOnly = false) @Nullable MessageListener messageListener) {
-      messageListener = JmsConsumerContext.unwrapMessageListener(messageListener);
+    public static void onExit(@Advice.This MessageConsumer consumer) {
+      JmsConsumerContext.closeConsumer(consumer);
     }
   }
 }

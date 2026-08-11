@@ -16,6 +16,7 @@ import io.opentelemetry.javaagent.extension.instrumentation.TypeInstrumentation;
 import io.opentelemetry.javaagent.extension.instrumentation.TypeTransformer;
 import javax.annotation.Nullable;
 import javax.jms.MessageConsumer;
+import javax.jms.Session;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.matcher.ElementMatcher;
@@ -35,10 +36,16 @@ class JmsSessionInstrumentation implements TypeInstrumentation {
   @Override
   public void transform(TypeTransformer transformer) {
     transformer.applyAdviceToMethod(
-        namedOneOf("createDurableSubscriber", "createDurableConsumer")
+        namedOneOf(
+                "createDurableSubscriber",
+                "createDurableConsumer",
+                "createSharedConsumer",
+                "createSharedDurableConsumer")
             .and(takesArgument(1, String.class))
             .and(isPublic()),
         getClass().getName() + "$CreateDurableConsumerAdvice");
+    transformer.applyAdviceToMethod(
+        named("close").and(isPublic()), getClass().getName() + "$CloseAdvice");
   }
 
   @SuppressWarnings("unused")
@@ -46,11 +53,22 @@ class JmsSessionInstrumentation implements TypeInstrumentation {
 
     @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
     public static void onExit(
+        @Advice.This Session session,
         @Advice.Argument(1) String subscriptionName,
         @Advice.Return @Nullable MessageConsumer consumer) {
       if (consumer != null) {
         JmsConsumerContext.setSubscriptionName(consumer, subscriptionName);
+        JmsConsumerContext.registerConsumer(session, consumer);
       }
+    }
+  }
+
+  @SuppressWarnings("unused")
+  public static class CloseAdvice {
+
+    @Advice.OnMethodExit(suppress = Throwable.class, inline = false)
+    public static void onExit(@Advice.This Session session) {
+      JmsConsumerContext.closeSession(session);
     }
   }
 }

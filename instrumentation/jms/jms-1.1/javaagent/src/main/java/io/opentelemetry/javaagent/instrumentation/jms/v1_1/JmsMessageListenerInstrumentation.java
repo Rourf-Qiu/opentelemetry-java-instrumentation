@@ -19,6 +19,7 @@ import io.opentelemetry.javaagent.extension.instrumentation.TypeTransformer;
 import io.opentelemetry.javaagent.instrumentation.jms.common.v1_1.MessageWithDestination;
 import javax.annotation.Nullable;
 import javax.jms.Message;
+import javax.jms.MessageListener;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.description.type.TypeDescription;
 import net.bytebuddy.matcher.ElementMatcher;
@@ -58,9 +59,13 @@ class JmsMessageListenerInstrumentation implements TypeInstrumentation {
       }
 
       @Nullable
-      public static AdviceScope start(Message message) {
+      public static AdviceScope start(MessageListener messageListener, Message message) {
         Context parentContext = Context.current();
         String subscriptionName = JmsConsumerContext.getSubscriptionName(message);
+        if (subscriptionName == null) {
+          subscriptionName = JmsConsumerContext.getSubscriptionName(messageListener);
+          JmsConsumerContext.setSubscriptionName(message, subscriptionName);
+        }
         MessageWithDestination messageWithDestination =
             MessageWithDestination.create(
                 JavaxMessageAdapter.create(message), null, subscriptionName);
@@ -82,8 +87,9 @@ class JmsMessageListenerInstrumentation implements TypeInstrumentation {
 
     @Nullable
     @Advice.OnMethodEnter(suppress = Throwable.class, inline = false)
-    public static AdviceScope onEnter(@Advice.Argument(0) Message message) {
-      return AdviceScope.start(message);
+    public static AdviceScope onEnter(
+        @Advice.This MessageListener messageListener, @Advice.Argument(0) Message message) {
+      return AdviceScope.start(messageListener, message);
     }
 
     @Advice.OnMethodExit(onThrowable = Throwable.class, suppress = Throwable.class, inline = false)
