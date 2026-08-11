@@ -7,13 +7,17 @@ package io.opentelemetry.javaagent.instrumentation.spring.jms.v6_0;
 
 import static io.opentelemetry.api.trace.SpanKind.CONSUMER;
 import static io.opentelemetry.api.trace.SpanKind.PRODUCER;
+import static io.opentelemetry.instrumentation.api.internal.SemconvStability.emitStableMessagingSemconv;
 import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.equalTo;
 import static io.opentelemetry.sdk.testing.assertj.OpenTelemetryAssertions.satisfies;
 import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_DESTINATION_NAME;
 import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_MESSAGE_ID;
 import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_OPERATION;
+import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_OPERATION_NAME;
+import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_OPERATION_TYPE;
 import static io.opentelemetry.semconv.incubating.MessagingIncubatingAttributes.MESSAGING_SYSTEM;
 
+import io.opentelemetry.sdk.trace.data.LinkData;
 import org.assertj.core.api.AbstractStringAssert;
 
 class SpringListenerSuppressReceiveSpansTest extends AbstractSpringJmsListenerTest {
@@ -21,6 +25,37 @@ class SpringListenerSuppressReceiveSpansTest extends AbstractSpringJmsListenerTe
   @SuppressWarnings("deprecation") // using deprecated semconv
   @Override
   void assertSpringJmsListener() {
+    if (emitStableMessagingSemconv()) {
+      testing.waitAndAssertTraces(
+          trace ->
+              trace.hasSpansSatisfyingExactly(
+                  span -> span.hasName("parent").hasNoParent(),
+                  span ->
+                      span.hasName("send spring-jms-listener")
+                          .hasKind(PRODUCER)
+                          .hasParent(trace.getSpan(0))
+                          .hasAttributesSatisfyingExactly(
+                              equalTo(MESSAGING_SYSTEM, "jms"),
+                              equalTo(MESSAGING_DESTINATION_NAME, "spring-jms-listener"),
+                              equalTo(MESSAGING_OPERATION_NAME, "send"),
+                              equalTo(MESSAGING_OPERATION_TYPE, "send"),
+                              satisfies(MESSAGING_MESSAGE_ID, AbstractStringAssert::isNotBlank)),
+                  span ->
+                      span.hasName("process spring-jms-listener")
+                          .hasKind(CONSUMER)
+                          .hasParent(trace.getSpan(1))
+                          .hasLinks(LinkData.create(trace.getSpan(1).getSpanContext()))
+                          .hasAttributesSatisfyingExactly(
+                              equalTo(MESSAGING_SYSTEM, "jms"),
+                              equalTo(MESSAGING_DESTINATION_NAME, "spring-jms-listener"),
+                              equalTo(MESSAGING_OPERATION_NAME, "process"),
+                              equalTo(MESSAGING_OPERATION_TYPE, "process"),
+                              satisfies(MESSAGING_MESSAGE_ID, AbstractStringAssert::isNotBlank)),
+                  span -> span.hasName("consumer").hasParent(trace.getSpan(2))));
+      assertMetrics(false);
+      return;
+    }
+
     testing.waitAndAssertTraces(
         trace ->
             trace.hasSpansSatisfyingExactly(
@@ -45,5 +80,6 @@ class SpringListenerSuppressReceiveSpansTest extends AbstractSpringJmsListenerTe
                             equalTo(MESSAGING_OPERATION, "process"),
                             satisfies(MESSAGING_MESSAGE_ID, AbstractStringAssert::isNotBlank)),
                 span -> span.hasName("consumer").hasParent(trace.getSpan(2))));
+    assertMetrics(false);
   }
 }

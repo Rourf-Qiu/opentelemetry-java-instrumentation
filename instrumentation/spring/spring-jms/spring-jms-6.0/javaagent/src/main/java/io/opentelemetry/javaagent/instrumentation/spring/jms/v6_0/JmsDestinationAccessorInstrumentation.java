@@ -5,12 +5,14 @@
 
 package io.opentelemetry.javaagent.instrumentation.spring.jms.v6_0;
 
+import static io.opentelemetry.api.trace.SpanKind.CLIENT;
+import static io.opentelemetry.api.trace.SpanKind.CONSUMER;
+import static io.opentelemetry.instrumentation.api.internal.SemconvStability.emitStableMessagingSemconv;
 import static io.opentelemetry.javaagent.instrumentation.spring.jms.v6_0.SpringJmsSingletons.RECEIVE_TELEMETRY_ENABLED;
 import static io.opentelemetry.javaagent.instrumentation.spring.jms.v6_0.SpringJmsSingletons.receiveInstrumenter;
 import static net.bytebuddy.matcher.ElementMatchers.named;
 import static net.bytebuddy.matcher.ElementMatchers.returns;
 
-import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.context.Context;
 import io.opentelemetry.context.Scope;
 import io.opentelemetry.instrumentation.api.internal.InstrumenterUtil;
@@ -48,7 +50,10 @@ class JmsDestinationAccessorInstrumentation implements TypeInstrumentation {
       }
       // suppress receive span creation in jms instrumentation
       Context context =
-          InstrumenterUtil.suppressSpan(receiveInstrumenter(), currentContext, SpanKind.CONSUMER);
+          InstrumenterUtil.suppressSpan(
+              receiveInstrumenter(),
+              currentContext,
+              emitStableMessagingSemconv() ? CLIENT : CONSUMER);
       return context.makeCurrent();
     }
 

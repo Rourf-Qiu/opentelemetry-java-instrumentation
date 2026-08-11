@@ -57,8 +57,39 @@ tasks {
     filter {
       excludeTestsMatching("SpringListenerSuppressReceiveSpansTest")
     }
+    jvmArgs("-Dotel.instrumentation.messaging.experimental.receive-telemetry.enabled=true")
     jvmArgs("-Dotel.semconv-stability.preview=messaging")
-    systemProperty("metadataConfig", "otel.semconv-stability.preview=messaging")
+    systemProperty(
+      "metadataConfig",
+      "otel.instrumentation.messaging.experimental.receive-telemetry.enabled=true,otel.semconv-stability.preview=messaging",
+    )
+  }
+
+  val testMessagingPreviewReceiveSpansDisabled =
+    register<Test>("testMessagingPreviewReceiveSpansDisabled") {
+      testClassesDirs = sourceSets.test.get().output.classesDirs
+      classpath = sourceSets.test.get().runtimeClasspath
+      filter {
+        includeTestsMatching("SpringListenerSuppressReceiveSpansTest")
+      }
+      include("**/SpringListenerSuppressReceiveSpansTest.*")
+      jvmArgs("-Dotel.instrumentation.messaging.experimental.receive-telemetry.enabled=false")
+      jvmArgs("-Dotel.semconv-stability.preview=messaging")
+      systemProperty(
+        "metadataConfig",
+        "otel.instrumentation.messaging.experimental.receive-telemetry.enabled=false,otel.semconv-stability.preview=messaging",
+      )
+    }
+
+  val testV3Preview = register<Test>("testV3Preview") {
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    filter {
+      includeTestsMatching("SpringListenerSuppressReceiveSpansTest")
+    }
+    include("**/SpringListenerSuppressReceiveSpansTest.*")
+    jvmArgs("-Dotel.instrumentation.common.v3-preview=true")
+    systemProperty("metadataConfig", "otel.instrumentation.common.v3-preview=true")
   }
 
   val testBothSemconv = register<Test>("testBothSemconv") {
@@ -84,6 +115,12 @@ tasks {
   }
 
   check {
-    dependsOn(testReceiveSpansDisabled, testMessagingPreview, testBothSemconv)
+    dependsOn(
+      testReceiveSpansDisabled,
+      testMessagingPreview,
+      testMessagingPreviewReceiveSpansDisabled,
+      testV3Preview,
+      testBothSemconv,
+    )
   }
 }
